@@ -82,7 +82,7 @@ else
 	MEMTOTAL_FMT=$(echo $MEMTOTAL_FMT GiB)
 fi
 
-# UNRECLAIMABLE SLAB INFO
+# UNRECLAIMABLE SLAB AND SHMEM INFO
 MEMINFO=$(awk '/active_anon:.*inactive_anon:.*isolated_anon/,/Node 0/' <<< "$DATASET" | grep -v 'Node 0')
 SUNRECLAIM_PAGES=$(grep -Eo 'unreclaimable:[0-9]+' <<< "$MEMINFO" | awk -F: '{print $2}')
 SUNRECLAIM_PERCENTAGE=$(printf "%.2f\n" $(echo "$SUNRECLAIM_PAGES/$MEMTOTAL_PAGES*100"|bc -l) )
@@ -118,6 +118,14 @@ fi
 if [[ $X86_64 -eq 1 ]]; then
 	SUNRECLAIM_MIB=$(printf "%.2f\n" $(echo "$SUNRECLAIM_PAGES / 256"|bc -l) )
 	SUNRECLAIM_FMT=$(echo $SUNRECLAIM_MIB MiB)
+fi
+
+SHMEM_PAGES=$(grep -Eo 'shmem:[0-9]+' <<< "$MEMINFO" | awk -F: '{print $2}')
+SHMEM_PERCENTAGE=$(printf "%.2f\n" $(echo "$SHMEM_PAGES/$MEMTOTAL_PAGES*100"|bc -l) )
+
+if [[ $X86_64 -eq 1 ]]; then
+	SHMEM_MIB=$(printf "%.2f\n" $(echo "$SHMEM_PAGES / 256"|bc -l) )
+	SHMEM_FMT=$(echo $SHMEM_MIB MiB)
 fi
 
 # HUGE PAGES INFO
@@ -215,7 +223,9 @@ fi
 PROCSLABHUGE_PCT=$(printf "%.2f\n" $(echo "$RSSPCT+$SUNRECLAIM_PERCENTAGE+$HP_PCT"|bc -l) )
 
 if (( $(echo "$PROCSLABHUGE_PCT < 85.0" | bc -l) )); then
-	if [[ -n $(grep -s balloon lsmod) ]]; then
+	if (( $(echo "$SHMEM_PERCENTAGE > 85.0" | bc -l) )); then
+		SHMOUT2=1
+	elif [[ -n $(grep -s balloon lsmod) ]]; then
 		BALLOONOUT1=1
 	else
 		MEMLEAKOUT1=1
@@ -250,17 +260,22 @@ echo
 echo $OOMHEADER | sed 's/^/    /'
 echo
 
-# Slab info
-echo "[I:$NUM] Unreclaimable slab info:" ; NUM=$(echo "$NUM+1"|bc)
+# Slab and shmem info
+echo "[I:$NUM] Unreclaimable slab and shmem info:" ; NUM=$(echo "$NUM+1"|bc)
 echo
 echo "Mem-Info:" | sed 's/^/    /'
 echo "$MEMINFO" | sed 's/^/    /'
 echo
 if [[ $X86_64 -eq 1 ]]; then
 	echo "Unreclaimable slab: $SUNRECLAIM_FMT ($SUNRECLAIM_PERCENTAGE% of MemTotal)"
-	echo
 else
 	echo "Unreclaimable slab: $SUNRECLAIM_PAGES pages ($SUNRECLAIM_PERCENTAGE% of MemTotal)"
+fi
+if [[ $X86_64 -eq 1 ]]; then
+	echo "Shmem: $SHMEM_FMT ($SHMEM_PERCENTAGE% of Memtotal)"
+	echo
+else
+	echo "Shmem: $SHMEM_PAGES pages ($SHMEM_PERCENTAGE% of MemTotal)"
 	echo
 fi
 if [[ $SLABOUT1 -eq 1 ]]; then
@@ -320,6 +335,10 @@ echo " ($RSSPCT% of MemTotal)"
 if [[ $SHMOUT1 -eq 1 ]]; then
 	echo
 	echo Total memory used by processes exceeds MemTotal. Applications are likely making use of shared memory.
+fi
+if [[ $SHMOUT2 -eq 1 ]]; then
+	echo
+	echo "Shmem using > 85% of MemTotal."
 fi
 if [[ $BALLOONOUT1 -eq 1 ]]; then
 	echo
