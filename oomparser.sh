@@ -1,11 +1,14 @@
 #!/bin/bash
 
 # Run in the root of a sosreport to diagnose an OOM event
+# Ping siddle with any questions
+
+#TODO: Test with RHEL 8 OOM where unreclaimable slab > userspace RSS ## CASE 02716286 ##
 
 if [[ $1 == "--help" || $1 == "-h" ]]; then
 	echo "Run in the root of a sosreport to diagnose an OOM event. The script will automatically check"
-	echo "sos_commands/kernel/dmesg and var/log/messages for the latest OOM. You can optionally provide"
-	echo "a file containing an OOM message with 'oomparser.sh <file>'"
+	echo "sos_commands/kernel/dmesg, var/log/messages, and sos_commands/logs/journalctl_--no-pager_--catalog_--boot_-1"
+	echo "for the latest OOM. You can optionally provide a file containing an OOM message with 'oomparser.sh <file>'"
 	exit 0
 fi
 
@@ -13,12 +16,14 @@ fi
 # User can provide a file to look for the OOM with 'oomparser.sh <file>'
 if [[ -n $1 && -f $1 ]]; then
 	OOMHEADER=$(grep -s 'invoked oom' $1 | tail -1)
+	cp $1 oom
 	if [[ -z $OOMHEADER ]]; then
 		echo "Couldn't find \"invoked oom\" in $1"
 		exit 1
 	fi
 fi
 
+#TODO: clean this up
 if [[ -z $OOMHEADER ]]; then
 	OOMHEADER=$(grep -s 'invoked oom' sos_commands/kernel/dmesg | tail -1)
 	if [[ -n $OOMHEADER ]]; then
@@ -28,9 +33,14 @@ if [[ -z $OOMHEADER ]]; then
 		if [[ -n $OOMHEADER ]]; then
 			cp var/log/messages oom
 		elif [[ -z $OOMHEADER ]]; then
-			echo "Couldn't find \"invoked oom\" in sos_commands/kernel/dmesg or var/log/messages"
-			echo "You can provide a file in which to look for an OOM with 'oomparser.sh <file>'"
-			exit 1
+			OOMHEADER=$(grep -s 'invoked oom' sos_commands/logs/journalctl_--no-pager_--catalog_--boot_-1 | tail -1)
+			if [[ -n $OOMHEADER ]]; then
+				cp sos_commands/logs/journalctl_--no-pager_--catalog_--boot_-1 oom
+			elif [[ -z $OOMHEADER ]]; then
+				echo "Couldn't find \"invoked oom\" in sos_commands/kernel/dmesg or var/log/messages"
+				echo "You can provide a file in which to look for an OOM with 'oomparser.sh <file>'"
+				exit 1
+			fi
 		fi
 	fi
 fi
@@ -118,6 +128,13 @@ fi
 if [[ $X86_64 -eq 1 ]]; then
 	SUNRECLAIM_MIB=$(printf "%.2f\n" $(echo "$SUNRECLAIM_PAGES / 256"|bc -l) )
 	SUNRECLAIM_FMT=$(echo $SUNRECLAIM_MIB MiB)
+fi
+
+if [[ -n $(grep 'Unreclaimable slab info' oom) ]]; then
+	SLABOUT3=1
+	USI=$(awk '/Unreclaimable slab info/,/pid.*uid.*tgid.*total_vm/' oom)
+	USI=$(grep -Ev 'Unreclaimable slab info|pid.*uid.*tgid.*total_vm' <<< $USI)
+	USI=$(cat <(head -1 <<< $USI) <(sort -nrk $(awk '{print NF;exit}' <<< $USI) <<< $USI) | column -t | head)
 fi
 
 SHMEM_PAGES=$(grep -Eo 'shmem:[0-9]+' <<< "$MEMINFO" | awk -F: '{print $2}')
@@ -286,7 +303,12 @@ if [[ $SLABOUT1 -eq 1 ]]; then
 	echo
 fi
 if [[ $SLABOUT2 -eq 1 ]]; then
-	echo Slab was high in the OOM but not in the sos. Consider setting vm.panic_on_oom or tracking slab allocations.
+	echo Slab was high in the OOM but not in the sos. Consider tracking slab allocations.
+	echo
+fi
+if [[ $SLABOUT3 -eq 1 ]]; then
+	echo Unreclaimable slab info at time of OOM: | sed 's/^/    /'
+	echo "$USI" | sed 's/^/    /'
 	echo
 fi
 
