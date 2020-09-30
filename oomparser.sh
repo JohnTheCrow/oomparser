@@ -3,77 +3,87 @@
 # Run in the root of a sosreport to diagnose an OOM event
 # Ping siddle with any questions
 
-#TODO: Test with RHEL 8 OOM where unreclaimable slab > userspace RSS ## CASE 02716286 ##
+#TODO: Protect against files in an sosreport potentially not existing
+
+SRCFILES="sos_commands/kernel/dmesg var/log/messages sos_commands/logs/journalctl_--no-pager_--catalog_--boot_-1"
 
 if [[ $1 == "--help" || $1 == "-h" ]]; then
 	echo "Run in the root of a sosreport to diagnose an OOM event. The script will automatically check"
-	echo "sos_commands/kernel/dmesg, var/log/messages, and sos_commands/logs/journalctl_--no-pager_--catalog_--boot_-1"
+	echo "$SRCFILES"
 	echo "for the latest OOM. You can optionally provide a file containing an OOM message with 'oomparser.sh <file>'"
 	exit 0
 fi
 
 # LATEST OOM
 # User can provide a file to look for the OOM with 'oomparser.sh <file>'
-if [[ -n $1 && -f $1 ]]; then
+#TODO: only cp oom as a debugging feature, use a variable for normal operation
+if [[ -f $1 ]]; then
 	OOMHEADER=$(grep -s 'invoked oom' $1 | tail -1)
-	cp $1 oom
 	if [[ -z $OOMHEADER ]]; then
 		echo "Couldn't find \"invoked oom\" in $1"
 		exit 1
 	fi
+	cp $1 oom
+elif [[ -n $1 ]]; then
+	echo "Couldn't find $1"
+	exit 1
 fi
 
-#TODO: clean this up
 if [[ -z $OOMHEADER ]]; then
-	OOMHEADER=$(grep -s 'invoked oom' sos_commands/kernel/dmesg | tail -1)
-	if [[ -n $OOMHEADER ]]; then
-		cp sos_commands/kernel/dmesg oom
-	elif [[ -z $OOMHEADER ]]; then
-		OOMHEADER=$(grep -s 'invoked oom' var/log/messages | tail -1)
+	for file in $SRCFILES; do
+		OOMHEADER=$(grep -s 'invoked oom' $file | tail -1)
 		if [[ -n $OOMHEADER ]]; then
-			cp var/log/messages oom
-		elif [[ -z $OOMHEADER ]]; then
-			OOMHEADER=$(grep -s 'invoked oom' sos_commands/logs/journalctl_--no-pager_--catalog_--boot_-1 | tail -1)
-			if [[ -n $OOMHEADER ]]; then
-				cp sos_commands/logs/journalctl_--no-pager_--catalog_--boot_-1 oom
-			elif [[ -z $OOMHEADER ]]; then
-				echo "Couldn't find \"invoked oom\" in sos_commands/kernel/dmesg or var/log/messages"
-				echo "You can provide a file in which to look for an OOM with 'oomparser.sh <file>'"
-				exit 1
-			fi
+			cp $file oom
+			break
 		fi
+	done
+	if [[ -z $OOMHEADER ]]; then
+		echo "Couldn't find \"invoked oom\" in the following files:"
+		for file in $SRCFILES; do echo -e "\t$file" ; done
+		echo "You can provide a file in which to look for an OOM with 'oomparser.sh <file>'"
+		exit 1
 	fi
 fi
 
+sed -e 's/\[//g' -e 's/\]//g' oom -i
+OOMHEADER=$(sed -e 's/\[//g' -e 's/\]//g'  <<< "$OOMHEADER")
+
+LNNUM=$(grep -n "$OOMHEADER" oom | tail -1 | awk -F: '{print $1}')
+DATASET=$(tail -n +$LNNUM oom)
+DATASET=$(awk '/invoked oom/,/Killed process/' <<< "$DATASET")
+echo "$DATASET" > oom
+
+# ENVIRONMENT INFO
+KERNELVERSION=$(grep -Eo '[234]\.[0-9]+\.[0-9]+-[0-9]+.*\.el[678].*\.[A-Za-z0-9_]+' -m1 <<< "$DATASET")
 X86_64=0
-if [[ $(awk '{print $(NF-1)}' uname) = "x86_64" ]]; then
+
+if [[ $(awk -F. '{print $(NF)}' <<< $KERNELVERSION) = "x86_64" ]]; then
 	X86_64=1
 fi
 
 #X86_64=0
 
-# ENVIRONMENT INFO
-ENVINFO=$(cat uname)
-KERNELVERSION=$(awk '{print $3}' <<< $ENVINFO)
+MAJORRELEASE=$(awk -F. '{print $(NF-1)}' <<< $KERNELVERSION)
 
-if [[ $KERNELVERSION == *"el6"* ]]; then
+if [[ $MAJORRELEASE == *"el6"* ]]; then
 	RHEL6=1
-elif [[ $KERNELVERSION == *"el7"* ]]; then
+elif [[ $MAJORRELEASE == *"el7"* ]]; then
 	RHEL7=1
-elif [[ $KERNELVERSION == *"el8"* ]]; then
+elif [[ $MAJORRELEASE == *"el8"* ]]; then
 	RHEL8=1
 fi
 
-HWINFO=$(grep -s -A2 'System Information' dmidecode)
-
-sed -e 's/\[//g' -e 's/\]//g' oom -i
-OOMHEADER=$(sed -e 's/\[//g' -e 's/\]//g'  <<< "$OOMHEADER")
+if [[ -f dmidecode ]]; then
+	HWINFO=$(grep -s -A2 'System Information' dmidecode)
+else
+	HWINFO="Unable to determine hardware information; dmidecode file missing"
+fi
 
 # MEMINFO
-LNNUM=$(grep -n "$OOMHEADER" oom | tail -1 | awk -F: '{print $1}')
-DATASET=$(tail -n +$LNNUM oom)
-echo "$DATASET" > oom
-
+#x86 / meminfo        = use meminfo
+#x86 / no meminfo     = use oom + calculation
+#not x86 / meminfo    = use meminfo
+#not x86 / no meminfo = use oom + no calculation
 MEMTOTAL_PAGES=$(grep -Eo '[0-9]+ pages RAM' <<< "$DATASET" | awk '{print $1}')
 MEMTOTAL_SOS=$(grep MemTotal proc/meminfo | awk '{print $2}') # KiB
 
@@ -130,9 +140,9 @@ if [[ $X86_64 -eq 1 ]]; then
 	SUNRECLAIM_FMT=$(echo $SUNRECLAIM_MIB MiB)
 fi
 
-if [[ -n $(grep 'Unreclaimable slab info' oom) ]]; then
+if [[ -n $(grep 'Unreclaimable slab info' <<< "$DATASET") ]]; then
 	SLABOUT3=1
-	USI=$(awk '/Unreclaimable slab info/,/pid.*uid.*tgid.*total_vm/' oom)
+	USI=$(awk '/Unreclaimable slab info/,/pid.*uid.*tgid.*total_vm/' <<< "$DATASET")
 	USI=$(grep -Ev 'Unreclaimable slab info|pid.*uid.*tgid.*total_vm' <<< $USI)
 	USI=$(cat <(head -1 <<< $USI) <(sort -nrk $(awk '{print NF;exit}' <<< $USI) <<< $USI) | column -t | head)
 fi
@@ -259,7 +269,7 @@ echo
 # Environment info
 echo "[I:$NUM] Environment info:" ; NUM=$(echo "$NUM+1"|bc)
 echo
-echo "$ENVINFO" | sed 's/^/    /'
+echo "$KERNELVERSION" | sed 's/^/    /'
 echo
 echo "$HWINFO" | sed 's/^/    /'
 echo
@@ -360,15 +370,15 @@ if [[ $SHMOUT1 -eq 1 ]]; then
 fi
 if [[ $SHMOUT2 -eq 1 ]]; then
 	echo
-	echo "Shmem using > 85% of MemTotal."
+	echo "Shmem using $SHMEM_PERCENTAGE of MemTotal."
 fi
 if [[ $BALLOONOUT1 -eq 1 ]]; then
 	echo
-	echo "User space RSS + unreclaimable slab + huge pages is < 85% of MemTotal and a balloon driver is"
+	echo "User space RSS + unreclaimable slab + huge pages is $PROCSLABHUGE_PCT% of MemTotal and a balloon driver is"
 	echo "loaded. Ballooning is a likely root cause of the OOM."
 fi
 if [[ $MEMLEAKOUT1 -eq 1 ]]; then
 	echo
-	echo "User space RSS + unreclaimable slab + huge pages is < 85% of MemTotal and \"balloon\" was not"
-	echo "found in the lsmod file. Consider tracking memory allocations over time."
+	echo "User space RSS + unreclaimable slab + huge pages is $PROCSLABHUGE_PCT% of MemTotal and \"balloon\" was not"
+	echo "found in the lsmod file (or lsmod file not found). Consider tracking memory allocations over time."
 fi
