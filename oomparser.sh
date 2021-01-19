@@ -84,7 +84,7 @@ fi
 #x86 / no meminfo     = use oom + calculation
 #not x86 / meminfo    = use meminfo
 #not x86 / no meminfo = use oom + no calculation
-MEMTOTAL_PAGES=$(grep -Eo '[0-9]+ pages RAM' <<< "$DATASET" | awk '{print $1}')
+MEMTOTAL_PAGES=$(grep -Eo '[0-9]+ pages RAM' <<< "$DATASET" | awk '{print $1; exit}')
 MEMTOTAL_SOS=$(grep MemTotal proc/meminfo | awk '{print $2}') # KiB
 
 if [[ $X86_64 -eq 1 ]]; then
@@ -104,7 +104,7 @@ fi
 
 # UNRECLAIMABLE SLAB AND SHMEM INFO
 MEMINFO=$(awk '/active_anon:.*inactive_anon:.*isolated_anon/,/Node 0/' <<< "$DATASET" | grep -v 'Node 0')
-SUNRECLAIM_PAGES=$(grep -Eo 'unreclaimable:[0-9]+' <<< "$MEMINFO" | awk -F: '{print $2}')
+SUNRECLAIM_PAGES=$(grep -Eo 'unreclaimable:[0-9]+' <<< "$MEMINFO" | awk -F: '{print $2; exit}')
 SUNRECLAIM_PERCENTAGE=$(printf "%.2f\n" $(echo "$SUNRECLAIM_PAGES/$MEMTOTAL_PAGES*100"|bc -l) )
 
 #SUNRECLAIM_PERCENTAGE=11
@@ -147,7 +147,7 @@ if [[ -n $(grep 'Unreclaimable slab info' <<< "$DATASET") ]]; then
 	USI=$(cat <(head -1 <<< $USI) <(sort -nrk $(awk '{print NF;exit}' <<< $USI) <<< $USI) | column -t | head)
 fi
 
-SHMEM_PAGES=$(grep -Eo 'shmem:[0-9]+' <<< "$MEMINFO" | awk -F: '{print $2}')
+SHMEM_PAGES=$(grep -Eo 'shmem:[0-9]+' <<< "$MEMINFO" | awk -F: '{print $2; exit}')
 SHMEM_PERCENTAGE=$(printf "%.2f\n" $(echo "$SHMEM_PAGES/$MEMTOTAL_PAGES*100"|bc -l) )
 
 if [[ $X86_64 -eq 1 ]]; then
